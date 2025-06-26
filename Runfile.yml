@@ -1,0 +1,14 @@
+tasks:
+  start:
+    cmd:
+      - go build -o ./bin/keymod ./cmd
+      - ./bin/keymod --debug
+
+  dev:
+    watch:
+      enabled: true
+      extensions:
+        - .go
+    cmd:
+      - go build -o ./bin/keymod ./cmd
+      - ./bin/keymod
