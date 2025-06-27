@@ -33,6 +33,13 @@ func parseEventType(t int32) string {
 	return ""
 }
 
+func parseKeyCode(s string) evdev.EvCode {
+	if strings.HasPrefix(s, "KEY_") {
+		return evdev.KEYFromString[s]
+	}
+	return evdev.KEYFromString["KEY_"+s]
+}
+
 func eventToString(ev *evdev.InputEvent) string {
 	return fmt.Sprintf("[type] %-12s[key] %s", parseEventType(ev.Value), ev.CodeName())
 }
@@ -44,7 +51,7 @@ func findKeyboard() (*evdev.InputDevice, error) {
 		return nil, err
 	}
 
-	logger.Info("devices", "list", devicePaths)
+	logger.Debug("devices", "list", devicePaths)
 
 	for _, devpath := range devicePaths {
 		if devpath.Name == "BY Tech Gaming Keyboard" {
@@ -128,6 +135,9 @@ func withModifierKey(modifier evdev.EvCode, events ...*evdev.InputEvent) []*evde
 }
 
 func (kdb *MyModKeyboard) dispatchKeyCodes(events ...*evdev.InputEvent) {
+	if len(events) == 0 {
+		return
+	}
 	for i := range events {
 		kdb.device.WriteOne(events[i])
 	}
@@ -139,93 +149,26 @@ func (kdb *MyModKeyboard) dispatchKeyCodes(events ...*evdev.InputEvent) {
 	})
 }
 
-type ModKey struct {
-	OnTap  func() error
-	OnHold func() error
+func (kdb *MyModKeyboard) dispatchRawKeyCodes(events ...*evdev.InputEvent) {
+	if len(events) == 0 {
+		return
+	}
+	for i := range events {
+		kdb.device.WriteOne(events[i])
+	}
 }
 
 type MyModKeyboard struct {
-	IsHoldingSpace  bool
-	IsPressingSpace bool
-	SpacePressedAt  time.Time
+	device    *evdev.InputDevice
+	keyDownCh chan *evdev.InputEvent
+	cfg       *ParsedConfig
 
-	IsHoldingCaps  bool
-	IsPressingCaps bool
-	CapsPressedAt  time.Time
+	onModHold    func()
+	onModRelease func()
 
-	device  *evdev.InputDevice
-	ModKeys map[evdev.EvCode]ModKey
-
-	EventsCh        chan *evdev.InputEvent
-	KeyDownEventsCh chan *evdev.InputEvent
-}
-
-const thresholdTime = 100
-
-func (kdb *MyModKeyboard) handleSpaceKey(event *evdev.InputEvent) {
-	switch event.Value {
-	case KeyUp:
-		{
-			logger.Info("got space [UP]", "event", eventToString(event), "isPressingSpace", kdb.IsPressingSpace, "isHoldingSpace", kdb.IsHoldingSpace)
-
-			if kdb.IsPressingSpace {
-				kdb.IsPressingSpace = false
-				logger.Info("dispatching space")
-				kdb.dispatchKeyCodes(eventKeyPress(evdev.KEY_SPACE)...)
-			}
-
-			if kdb.IsHoldingSpace {
-				kdb.dispatchKeyCodes(eventKeyUp(evdev.KEY_LEFTSHIFT))
-			}
-
-			kdb.IsPressingSpace = false
-			kdb.IsHoldingSpace = false
-		}
-	case KeyDown:
-		{
-			logger.Info("got space [Down]", "event", eventToString(event))
-
-			kdb.IsPressingSpace = true
-			kdb.SpacePressedAt = time.Now()
-		}
-	case KeyHold:
-		{
-			kdb.IsHoldingSpace = true
-			logger.Debug("got space [HOLD]", "type", event.TypeName(), "code", event.CodeName(), "event", event)
-		}
-	}
-}
-
-func (kdb *MyModKeyboard) handleCapsKey(event *evdev.InputEvent) {
-	switch event.Value {
-	case KeyUp:
-		{
-			logger.Info("got caps [UP]", "event", eventToString(event))
-
-			if kdb.IsPressingCaps {
-				logger.Info("dispatching Esc")
-				kdb.dispatchKeyCodes(eventKeyPress(evdev.KEY_ESC)...)
-			}
-
-			if kdb.IsHoldingCaps {
-				kdb.dispatchKeyCodes(eventKeyUp(evdev.KEY_LEFTCTRL))
-			}
-
-			kdb.IsHoldingCaps = false
-			kdb.IsPressingCaps = false
-		}
-	case KeyDown:
-		{
-			logger.Info("got Caps [Down]", "event", eventToString(event))
-			kdb.IsPressingCaps = true
-			kdb.CapsPressedAt = time.Now()
-		}
-	case KeyHold:
-		{
-			kdb.IsHoldingCaps = true
-			logger.Info("got caps [HOLD]", "event", eventToString(event))
-		}
-	}
+	sendHoldEvent context.CancelFunc
+	counter       int
+	prev          *TapAndHold
 }
 
 func (kdb *MyModKeyboard) handler(event *evdev.InputEvent) {
@@ -234,41 +177,53 @@ func (kdb *MyModKeyboard) handler(event *evdev.InputEvent) {
 		return
 	}
 
-	switch event.Code {
-	case evdev.KEY_SPACE:
-		kdb.handleSpaceKey(event)
-	case evdev.KEY_CAPSLOCK:
-		kdb.handleCapsKey(event)
-	default:
-		{
-			if event.Value != KeyDown {
-				kdb.dispatchKeyCodes(event)
-				return
-			}
-
-			events := []*evdev.InputEvent{event}
-
-			if event.Value == KeyDown && kdb.IsPressingSpace || kdb.IsHoldingSpace {
-				kdb.IsHoldingSpace = true
-				kdb.IsPressingSpace = false
-				logger.Info("holding space key", "event", eventToString(event))
-				events = withModifierKey(evdev.KEY_LEFTSHIFT, events...)
-			}
-
-			if event.Value == KeyDown && kdb.IsPressingCaps || kdb.IsHoldingCaps {
-				kdb.IsHoldingCaps = true
-				kdb.IsPressingCaps = false
-				logger.Info("holding caps key", "event", eventToString(event))
-				events = withModifierKey(evdev.KEY_LEFTCTRL, events...)
-			}
-
-			logger.Debug("dispatching", "event", eventToString(event))
-			kdb.dispatchKeyCodes(events...)
-		}
+	if event.Value == KeyDown {
+		kdb.counter += 1
 	}
+
+	if tapAndHold, ok := kdb.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY {
+		logger.Info("modkey", "event", eventToString(event), "kbd.counter", kdb.counter)
+		switch event.Value {
+		case KeyDown:
+			tapAndHold.pressedIdx = kdb.counter
+			kdb.prev = tapAndHold
+		case KeyUp:
+			if kdb.prev != nil && tapAndHold.pressedIdx == kdb.prev.pressedIdx {
+				if kdb.prev.pressedIdx == kdb.counter {
+					// immediate release, no other keydown events in between, means => TAP behaviour
+					kdb.dispatchKeyCodes(eventKeyPress(parseKeyCode(kdb.prev.Tap))...)
+				} else {
+					kdb.dispatchKeyCodes(eventKeyUp(parseKeyCode(kdb.prev.Hold)))
+				}
+				kdb.prev = nil
+			}
+		case KeyHold:
+			kdb.dispatchKeyCodes(eventKeyDown(parseKeyCode(kdb.prev.Hold)))
+		}
+
+		return
+	}
+
+	logger.Info("non-modkey", "event", event.String(), "kdb.counter", kdb.counter)
+	if kdb.prev != nil && kdb.prev.pressedIdx+1 == kdb.counter {
+		logger.Info("dispatching [hold]", "keycode", evdev.KEYToString[parseKeyCode(kdb.prev.Hold)], "timestamp", time.Now().Format(time.RFC3339))
+		kdb.dispatchKeyCodes(eventKeyDown(parseKeyCode(kdb.prev.Hold)))
+	}
+
+	kdb.dispatchKeyCodes(event)
 }
 
 var logger *fastlog.Logger
+
+func filter[T any](arr []T, fn func(T) bool) []T {
+	result := make([]T, len(arr))
+	for i := range arr {
+		if fn(arr[i]) {
+			result = append(result, arr[i])
+		}
+	}
+	return result
+}
 
 func main() {
 	var debug bool
@@ -276,11 +231,12 @@ func main() {
 	flag.Parse()
 
 	logger = fastlog.New(fastlog.Options{
-		Writer:        os.Stderr,
-		ShowCaller:    true,
-		ShowDebugLogs: debug,
-		EnableColors:  true,
-		Format:        fastlog.ConsoleFormat,
+		Writer:            os.Stderr,
+		ShowCaller:        false,
+		ShowDebugLogs:     debug,
+		EnableColors:      true,
+		TimestampFieldKey: "timestamp",
+		Format:            fastlog.ConsoleFormat,
 	})
 
 	// var keyboard *evdev.InputDevice
@@ -310,29 +266,53 @@ func main() {
 	defer cf()
 
 	if err := keyboard.Grab(); err != nil {
-		logger.Error("failed to clone device", "err", err)
+		logger.Error("failed to grab original keyboard", "err", err)
 		os.Exit(1)
 	}
+	eventsCh := make(chan *evdev.InputEvent, 1)
 
-	mykb := &MyModKeyboard{device: clone, IsHoldingSpace: false, IsHoldingCaps: false, EventsCh: make(chan *evdev.InputEvent, 1)}
+	c, err := LoadConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	logger.Info("hello", "cfg.modmap", c.ModMap)
+
+	mykb := &MyModKeyboard{
+		device:    clone,
+		keyDownCh: make(chan *evdev.InputEvent, 1),
+		cfg:       c,
+	}
 
 	go func() {
-		for ev := range mykb.EventsCh {
+		for ev := range eventsCh {
 			if strings.HasPrefix(ev.CodeName(), "KEY_") {
-				logger.Debug("keyboard input", "event", eventToString(ev))
+				// logger.Debug("keyboard input", "event", eventToString(ev))
 			}
 		}
+	}()
+
+	// go func() {
+	// 	for ev := range mykb.keyDownCh {
+	// 		logger.Debug("keyboard input [KEYDOWN]", "event", eventToString(ev))
+	// 	}
+	// }()
+
+	go func() {
+		<-mykb.keyDownCh
 	}()
 
 	for ctx.Err() == nil {
 		ev, err := keyboard.ReadOne()
 		if err != nil {
 			logger.Error("while reading event from source keyboard", "err", err)
-			<-time.After(3 * time.Second)
-			continue
+			return
 		}
 
-		mykb.EventsCh <- ev
+		eventsCh <- ev
+		// if strings.HasPrefix(ev.CodeName(), "KEY_") && ev.Value == KeyDown {
+		// 	mykb.keyDownCh <- ev
+		// }
 		mykb.handler(ev)
 	}
 }

@@ -3,6 +3,7 @@ tasks:
     cmd:
       - go build -o ./bin/keymod ./cmd
       - ./bin/keymod --debug
+      # - ./bin/keymod
 
   dev:
     watch:
@@ -12,3 +13,7 @@ tasks:
     cmd:
       - go build -o ./bin/keymod ./cmd
       - ./bin/keymod
+
+  build:
+    cmd:
+      - go build -ldflags='-s -w' -o ./bin/keymod ./cmd
