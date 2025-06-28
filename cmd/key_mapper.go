@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	evdev "github.com/holoplot/go-evdev"
 
@@ -31,6 +30,10 @@ func parseEventType(t int32) string {
 		return "KEY_HOLD"
 	}
 	return ""
+}
+
+func isKeyDown(event *evdev.InputEvent) bool {
+	return event.Value == KeyDown
 }
 
 func parseKeyCode(s string) evdev.EvCode {
@@ -168,49 +171,52 @@ type MyModKeyboard struct {
 
 	sendHoldEvent context.CancelFunc
 	counter       int
+	downCounter   int
 	prev          *TapAndHold
 }
 
-func (kdb *MyModKeyboard) handler(event *evdev.InputEvent) {
+func (kbd *MyModKeyboard) handler(event *evdev.InputEvent) {
 	if !strings.HasPrefix(event.CodeName(), "KEY_") {
-		kdb.dispatchKeyCodes(event)
+		kbd.dispatchKeyCodes(event)
 		return
 	}
 
-	if event.Value == KeyDown {
-		kdb.counter += 1
+	kbd.counter += 1
+	if isKeyDown(event) {
+		kbd.downCounter += 1
 	}
 
-	if tapAndHold, ok := kdb.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY {
-		logger.Info("modkey", "event", eventToString(event), "kbd.counter", kdb.counter)
+	logger := logger.With("event", eventToString(event), "kbd.prev", kbd.prev == nil, "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
+
+	if kbd.prev != nil && kbd.prev.pressedIdx+1 == kbd.downCounter && isKeyDown(event) {
+		logger.Info("dispatching [HOLD]", "keycode", evdev.KEYToString[parseKeyCode(kbd.prev.Hold)])
+		kbd.dispatchKeyCodes(eventKeyDown(parseKeyCode(kbd.prev.Hold)))
+		kbd.prev = nil
+	}
+
+	if tapAndHold, ok := kbd.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY {
 		switch event.Value {
 		case KeyDown:
-			tapAndHold.pressedIdx = kdb.counter
-			kdb.prev = tapAndHold
+			logger.Info("modkey [DOWN]")
+			tapAndHold.pressedIdx = kbd.downCounter
+			kbd.prev = tapAndHold
 		case KeyUp:
-			if kdb.prev != nil && tapAndHold.pressedIdx == kdb.prev.pressedIdx {
-				if kdb.prev.pressedIdx == kdb.counter {
-					// immediate release, no other keydown events in between, means => TAP behaviour
-					kdb.dispatchKeyCodes(eventKeyPress(parseKeyCode(kdb.prev.Tap))...)
-				} else {
-					kdb.dispatchKeyCodes(eventKeyUp(parseKeyCode(kdb.prev.Hold)))
-				}
-				kdb.prev = nil
+			logger.Info("modkey [UP]", "kbd.downCounter", kbd.downCounter)
+			if tapAndHold.pressedIdx == kbd.downCounter {
+				// immediate release, no other keydown events in between, means => TAP behaviour
+				logger.Info("dispatching [TAP]", "keycode", evdev.KEYToString[parseKeyCode(kbd.prev.Tap)])
+				kbd.dispatchKeyCodes(eventKeyPress(parseKeyCode(tapAndHold.Tap))...)
+				kbd.prev = nil
+				return
 			}
-		case KeyHold:
-			kdb.dispatchKeyCodes(eventKeyDown(parseKeyCode(kdb.prev.Hold)))
+			kbd.dispatchKeyCodes(eventKeyUp(parseKeyCode(tapAndHold.Hold)))
 		}
 
 		return
 	}
 
-	logger.Info("non-modkey", "event", event.String(), "kdb.counter", kdb.counter)
-	if kdb.prev != nil && kdb.prev.pressedIdx+1 == kdb.counter {
-		logger.Info("dispatching [hold]", "keycode", evdev.KEYToString[parseKeyCode(kdb.prev.Hold)], "timestamp", time.Now().Format(time.RFC3339))
-		kdb.dispatchKeyCodes(eventKeyDown(parseKeyCode(kdb.prev.Hold)))
-	}
-
-	kdb.dispatchKeyCodes(event)
+	logger.Info("non-modkey")
+	kbd.dispatchKeyCodes(event)
 }
 
 var logger *fastlog.Logger
@@ -231,12 +237,12 @@ func main() {
 	flag.Parse()
 
 	logger = fastlog.New(fastlog.Options{
-		Writer:            os.Stderr,
-		ShowCaller:        false,
-		ShowDebugLogs:     debug,
-		EnableColors:      true,
-		TimestampFieldKey: "timestamp",
-		Format:            fastlog.ConsoleFormat,
+		Writer:        os.Stderr,
+		ShowCaller:    false,
+		ShowDebugLogs: debug,
+		ShowTimestamp: true,
+		EnableColors:  true,
+		Format:        fastlog.ConsoleFormat,
 	})
 
 	// var keyboard *evdev.InputDevice
