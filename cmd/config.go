@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -12,10 +11,7 @@ type TapAndHold struct {
 	Tap  string `json:"tap"`
 	Hold string `json:"hold"`
 
-	abortHoldEvent context.CancelFunc
-	deferred       string
-
-	pressedIdx int
+	pressedCounter int
 }
 
 type Config struct {

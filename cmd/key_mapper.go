@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/pprof"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
+	"unicode"
 
 	evdev "github.com/holoplot/go-evdev"
 
@@ -47,37 +53,82 @@ func eventToString(ev *evdev.InputEvent) string {
 	return fmt.Sprintf("[type] %-12s[key] %s", parseEventType(ev.Value), ev.CodeName())
 }
 
-func findKeyboard() (*evdev.InputDevice, error) {
+func findAllKeyboards() ([]*evdev.InputDevice, error) {
 	devicePaths, err := evdev.ListDevicePaths()
 	if err != nil {
-		fmt.Println("Failed to list input devices:", err)
-		return nil, err
+		return nil, fmt.Errorf("failed to list input devices: %w", err)
 	}
 
-	logger.Debug("devices", "list", devicePaths)
+	var keyboards []*evdev.InputDevice
 
 	for _, devpath := range devicePaths {
-		if devpath.Name == "BY Tech Gaming Keyboard" {
-			// if devpath.Name == "CX 2.4G Wireless Receiver Keyboard" {
-			dev, err := evdev.Open(devpath.Path)
-			if err != nil {
-				return nil, err
-			}
-
-			return dev, nil
+		dev, err := evdev.Open(devpath.Path)
+		if err != nil {
+			logger.Debug("failed to open device", "path", devpath.Path, "error", err)
+			continue
 		}
 
-		// dev, err := evdev.Open(devpath.Path)
-		// if err != nil {
-		// 	return nil, err
-		// }
-		//
-		// if len(dev.CapableEvents(evdev.EV_KEY)) > 0 {
-		// 	return dev, nil
-		// }
+		// Check if device has KEY capabilities and can handle keyboard events
+		supportedKeys := dev.CapableEvents(evdev.EV_KEY)
+
+		if len(supportedKeys) == 0 {
+			dev.Close()
+			continue
+		}
+
+		isKeyboard := false
+
+		keyMap := make(map[evdev.EvCode]bool)
+		for _, key := range supportedKeys {
+			keyMap[key] = true
+		}
+
+		// NOTE: verifies if the device has some test keys
+		testKeys := []evdev.EvCode{evdev.KEY_A, evdev.KEY_SPACE, evdev.KEY_ENTER}
+		for _, key := range testKeys {
+			if keyMap[key] {
+				isKeyboard = true
+				break
+			}
+		}
+
+		if !isKeyboard {
+			dev.Close()
+			continue
+		}
+
+		keyboards = append(keyboards, dev)
+		name, _ := dev.Name()
+		logger.Info("Found keyboard device", "name", name, "path", devpath.Path)
 	}
 
-	return nil, fmt.Errorf("failed to find a keyboard device")
+	if len(keyboards) == 0 {
+		return nil, fmt.Errorf("no keyboard devices found")
+	}
+
+	slices.SortFunc(keyboards, func(a, b *evdev.InputDevice) int {
+		return extractDeviceNumber(a) - extractDeviceNumber(b)
+	})
+
+	return keyboards, nil
+}
+
+func extractDeviceNumber(s *evdev.InputDevice) int {
+	devPath := s.Path()
+
+	start := len(devPath) - 1
+	for i := start; i >= 0; i-- {
+		if !unicode.IsDigit(rune(devPath[i])) {
+			break
+		}
+		start = i
+	}
+
+	n, err := strconv.Atoi(devPath[start:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func cloneDevice(devicePath string) (*evdev.InputDevice, error) {
@@ -162,9 +213,10 @@ func (kdb *MyModKeyboard) dispatchRawKeyCodes(events ...*evdev.InputEvent) {
 }
 
 type MyModKeyboard struct {
-	device    *evdev.InputDevice
 	keyDownCh chan *evdev.InputEvent
 	cfg       *ParsedConfig
+
+	device InputDevice
 
 	onModHold    func()
 	onModRelease func()
@@ -175,7 +227,11 @@ type MyModKeyboard struct {
 	prev          *TapAndHold
 }
 
-func (kbd *MyModKeyboard) handler(event *evdev.InputEvent) {
+func (m *MyModKeyboard) ShutDown() error {
+	return m.device.Close()
+}
+
+func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 	if !strings.HasPrefix(event.CodeName(), "KEY_") {
 		kbd.dispatchKeyCodes(event)
 		return
@@ -188,7 +244,7 @@ func (kbd *MyModKeyboard) handler(event *evdev.InputEvent) {
 
 	logger := logger.With("event", eventToString(event), "kbd.prev", kbd.prev == nil, "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
 
-	if kbd.prev != nil && kbd.prev.pressedIdx+1 == kbd.downCounter && isKeyDown(event) {
+	if kbd.prev != nil && kbd.prev.pressedCounter+1 == kbd.downCounter && isKeyDown(event) {
 		logger.Info("dispatching [HOLD]", "keycode", evdev.KEYToString[parseKeyCode(kbd.prev.Hold)])
 		kbd.dispatchKeyCodes(eventKeyDown(parseKeyCode(kbd.prev.Hold)))
 		kbd.prev = nil
@@ -198,11 +254,11 @@ func (kbd *MyModKeyboard) handler(event *evdev.InputEvent) {
 		switch event.Value {
 		case KeyDown:
 			logger.Info("modkey [DOWN]")
-			tapAndHold.pressedIdx = kbd.downCounter
+			tapAndHold.pressedCounter = kbd.downCounter
 			kbd.prev = tapAndHold
 		case KeyUp:
 			logger.Info("modkey [UP]", "kbd.downCounter", kbd.downCounter)
-			if tapAndHold.pressedIdx == kbd.downCounter {
+			if tapAndHold.pressedCounter == kbd.downCounter {
 				// immediate release, no other keydown events in between, means => TAP behaviour
 				logger.Info("dispatching [TAP]", "keycode", evdev.KEYToString[parseKeyCode(kbd.prev.Tap)])
 				kbd.dispatchKeyCodes(eventKeyPress(parseKeyCode(tapAndHold.Tap))...)
@@ -219,62 +275,22 @@ func (kbd *MyModKeyboard) handler(event *evdev.InputEvent) {
 	kbd.dispatchKeyCodes(event)
 }
 
-var logger *fastlog.Logger
-
-func filter[T any](arr []T, fn func(T) bool) []T {
-	result := make([]T, len(arr))
-	for i := range arr {
-		if fn(arr[i]) {
-			result = append(result, arr[i])
-		}
-	}
-	return result
-}
-
-func main() {
-	var debug bool
-	flag.BoolVar(&debug, "debug", false, "--debug")
-	flag.Parse()
-
-	logger = fastlog.New(fastlog.Options{
-		Writer:        os.Stderr,
-		ShowCaller:    false,
-		ShowDebugLogs: debug,
-		ShowTimestamp: true,
-		EnableColors:  true,
-		Format:        fastlog.ConsoleFormat,
-	})
-
-	// var keyboard *evdev.InputDevice
-	// for _, dev := range devices {
-	// 	if dev.Capabilities[evdev.EV_KEY] != nil {
-	// 		keyboard = dev
-	// 		break
-	// 	}
-	// }
-
-	keyboard, err := findKeyboard()
-	if err != nil {
-		logger.Error("failed to find keyboard", "err", err)
-		os.Exit(1)
-	}
-
+func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 	logger.Info("listening on", "keyboard", must(keyboard.Name()))
+	defer logger.Info("STOPPED listening on", "keyboard", must(keyboard.Name()))
 
 	clone, err := cloneDevice(keyboard.Path())
 	if err != nil {
 		logger.Error("failed to clone device", "err", err)
-		os.Exit(1)
+		return err
 	}
 	defer clone.Close()
 
-	ctx, cf := signal.NotifyContext(context.TODO(), syscall.SIGINT, syscall.SIGTERM)
-	defer cf()
-
 	if err := keyboard.Grab(); err != nil {
 		logger.Error("failed to grab original keyboard", "err", err)
-		os.Exit(1)
+		return err
 	}
+	defer keyboard.Ungrab()
 	eventsCh := make(chan *evdev.InputEvent, 1)
 
 	c, err := LoadConfig()
@@ -285,24 +301,20 @@ func main() {
 	logger.Info("hello", "cfg.modmap", c.ModMap)
 
 	mykb := &MyModKeyboard{
-		device:    clone,
+		device:    &inputDeviceWrapper{clone},
 		keyDownCh: make(chan *evdev.InputEvent, 1),
 		cfg:       c,
 	}
 
-	go func() {
-		for ev := range eventsCh {
-			if strings.HasPrefix(ev.CodeName(), "KEY_") {
-				// logger.Debug("keyboard input", "event", eventToString(ev))
+	if debug {
+		go func() {
+			for ev := range eventsCh {
+				if strings.HasPrefix(ev.CodeName(), "KEY_") {
+					// logger.Debug("keyboard input", "event", eventToString(ev))
+				}
 			}
-		}
-	}()
-
-	// go func() {
-	// 	for ev := range mykb.keyDownCh {
-	// 		logger.Debug("keyboard input [KEYDOWN]", "event", eventToString(ev))
-	// 	}
-	// }()
+		}()
+	}
 
 	go func() {
 		<-mykb.keyDownCh
@@ -312,13 +324,123 @@ func main() {
 		ev, err := keyboard.ReadOne()
 		if err != nil {
 			logger.Error("while reading event from source keyboard", "err", err)
-			return
+			return err
 		}
 
 		eventsCh <- ev
-		// if strings.HasPrefix(ev.CodeName(), "KEY_") && ev.Value == KeyDown {
-		// 	mykb.keyDownCh <- ev
-		// }
-		mykb.handler(ev)
+		mykb.onEvent(ev)
 	}
+
+	return nil
+}
+
+var logger *fastlog.Logger
+
+var (
+	debug bool
+	first bool
+)
+
+func main() {
+	flag.BoolVar(&debug, "debug", false, "--debug")
+	flag.BoolVar(&first, "first", false, "use only the first keyboard that generates an event")
+	flag.Parse()
+
+	// Write memory profile to file
+	f, err := os.Create("/tmp/mem.prof")
+	if err != nil {
+		panic(err)
+	}
+
+	logger = fastlog.New(fastlog.Options{
+		Writer:        os.Stderr,
+		ShowCaller:    false,
+		ShowDebugLogs: debug,
+		ShowTimestamp: true,
+		EnableColors:  true,
+		Format:        fastlog.ConsoleFormat,
+	})
+
+	keyboards, err := findAllKeyboards()
+	if err != nil {
+		logger.Error("failed to find keyboard", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, cf := signal.NotifyContext(context.TODO(), syscall.SIGINT, syscall.SIGTERM)
+	defer cf()
+
+	if first && len(keyboards) > 1 {
+		logger.Info("Waiting for first keyboard event to select device...")
+
+		// type result struct {
+		// 	keyboard *evdev.InputDevice
+		// 	err      error
+		// }
+
+		firstEventCh := make(chan *evdev.InputDevice, len(keyboards))
+
+		firstEventCtx, firstEventCancel := context.WithCancel(ctx)
+
+		for i := range keyboards {
+			keyboard := keyboards[i]
+
+			if err := keyboard.Grab(); err != nil {
+				logger.Error("failed to grab original keyboard", "err", err)
+				panic(err)
+			}
+
+			go func(kb *evdev.InputDevice) {
+				defer kb.Ungrab()
+				ev, err := kb.ReadOne()
+				if err != nil {
+					return
+				}
+
+				if firstEventCtx.Err() == nil {
+					logger.Info("First event detected", "keyboard", must(kb.Name()), "event", eventToString(ev))
+					firstEventCh <- kb
+				}
+			}(keyboard)
+		}
+
+		var selectedKeyboard *evdev.InputDevice
+		select {
+		case kb := <-firstEventCh:
+			selectedKeyboard = kb
+			firstEventCancel()
+			close(firstEventCh)
+		case <-ctx.Done():
+			logger.Info("Interrupted before keyboard selection")
+			os.Exit(0)
+		}
+
+		go func() {
+			logger.Info("started profiling ...")
+			<-time.After(10 * time.Second)
+			pprof.WriteHeapProfile(f)
+			f.Close()
+			logger.Info("done ...")
+		}()
+
+		if err := Start(ctx, selectedKeyboard); err != nil {
+			logger.Error("FAILED, got", "err", err, "keyboard", must(selectedKeyboard.Name()))
+		}
+
+		return
+	}
+
+	var wg sync.WaitGroup
+	for i := range keyboards {
+		keyboard := keyboards[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := Start(ctx, keyboard); err != nil {
+				logger.Error("FAILED, got", "err", err, "keyboard", must(keyboard.Name()))
+			}
+		}()
+	}
+
+	wg.Wait()
 }

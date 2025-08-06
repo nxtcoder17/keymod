@@ -2,7 +2,7 @@ tasks:
   start:
     cmd:
       - go build -o ./bin/keymod ./cmd
-      - ./bin/keymod --debug
+      - ./bin/keymod --debug --first
       # - ./bin/keymod
 
   dev:
