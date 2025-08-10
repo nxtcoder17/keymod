@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime/pprof"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unicode"
 
 	evdev "github.com/holoplot/go-evdev"
@@ -145,8 +144,6 @@ func cloneDevice(devicePath string) (*evdev.InputDevice, error) {
 		return nil, err
 	}
 	return clonedDev, nil
-	// defer clonedDev.Close()
-	// moveMouse(clonedDev)
 }
 
 func must[T any](v T, err error) T {
@@ -178,13 +175,7 @@ func eventKeyDown(key evdev.EvCode) *evdev.InputEvent {
 func withModifierKey(modifier evdev.EvCode, events ...*evdev.InputEvent) []*evdev.InputEvent {
 	mods := make([]*evdev.InputEvent, 0, 2+len(events))
 	mods = append(mods, eventKeyDown(modifier))
-
 	mods = append(mods, events...)
-
-	// mods = append(mods, &evdev.InputEvent{
-	// 	Type: evdev.EV_KEY, Code: modifier, Value: KeyUp,
-	// })
-
 	return mods
 }
 
@@ -293,12 +284,10 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 	defer keyboard.Ungrab()
 	eventsCh := make(chan *evdev.InputEvent, 1)
 
-	c, err := LoadConfig()
+	c, err := LoadConfig(configFile)
 	if err != nil {
 		panic(err)
 	}
-
-	logger.Info("hello", "cfg.modmap", c.ModMap)
 
 	mykb := &MyModKeyboard{
 		device:    &inputDeviceWrapper{clone},
@@ -306,15 +295,15 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 		cfg:       c,
 	}
 
-	if debug {
-		go func() {
-			for ev := range eventsCh {
-				if strings.HasPrefix(ev.CodeName(), "KEY_") {
-					// logger.Debug("keyboard input", "event", eventToString(ev))
+	go func() {
+		for ev := range eventsCh {
+			if strings.HasPrefix(ev.CodeName(), "KEY_") {
+				if debug {
+					logger.Debug("keyboard input", "event", eventToString(ev))
 				}
 			}
-		}()
-	}
+		}
+	}()
 
 	go func() {
 		<-mykb.keyDownCh
@@ -339,27 +328,30 @@ var logger *fastlog.Logger
 var (
 	debug bool
 	first bool
+
+	configFile string
 )
 
 func main() {
 	flag.BoolVar(&debug, "debug", false, "--debug")
 	flag.BoolVar(&first, "first", false, "use only the first keyboard that generates an event")
-	flag.Parse()
 
-	// Write memory profile to file
-	f, err := os.Create("/tmp/mem.prof")
-	if err != nil {
-		panic(err)
+	xdgDataDir := os.Getenv("XDG_CONFIG_HOME")
+	if xdgDataDir == "" {
+		xdgDataDir = filepath.Join(os.Getenv("HOME"), ".config")
 	}
 
-	logger = fastlog.New(fastlog.Options{
-		Writer:        os.Stderr,
-		ShowCaller:    false,
-		ShowDebugLogs: debug,
-		ShowTimestamp: true,
-		EnableColors:  true,
-		Format:        fastlog.ConsoleFormat,
-	})
+	flag.StringVar(&configFile, "config", filepath.Join(xdgDataDir, "keymod", "config.toml"), "--config <path-to-keymod-config>")
+
+	flag.Parse()
+
+	if value, ok := os.LookupEnv("KEYMOD_CONFIG_FILE"); ok {
+		configFile = value
+	}
+
+	logger = fastlog.New(fastlog.ShowDebugLogs(debug), fastlog.WithoutCaller())
+
+	logger.Info("CONFIG", "file", configFile)
 
 	keyboards, err := findAllKeyboards()
 	if err != nil {
@@ -372,11 +364,6 @@ func main() {
 
 	if first && len(keyboards) > 1 {
 		logger.Info("Waiting for first keyboard event to select device...")
-
-		// type result struct {
-		// 	keyboard *evdev.InputDevice
-		// 	err      error
-		// }
 
 		firstEventCh := make(chan *evdev.InputDevice, len(keyboards))
 
@@ -414,14 +401,6 @@ func main() {
 			logger.Info("Interrupted before keyboard selection")
 			os.Exit(0)
 		}
-
-		go func() {
-			logger.Info("started profiling ...")
-			<-time.After(10 * time.Second)
-			pprof.WriteHeapProfile(f)
-			f.Close()
-			logger.Info("done ...")
-		}()
 
 		if err := Start(ctx, selectedKeyboard); err != nil {
 			logger.Error("FAILED, got", "err", err, "keyboard", must(selectedKeyboard.Name()))

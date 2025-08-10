@@ -2,8 +2,12 @@ tasks:
   start:
     cmd:
       - go build -o ./bin/keymod ./cmd
+      - ./bin/keymod --first
+
+  start:debug:
+    cmd:
+      - go build -o ./bin/keymod ./cmd
       - ./bin/keymod --debug --first
-      # - ./bin/keymod
 
   dev:
     watch:
@@ -17,3 +21,14 @@ tasks:
   build:
     cmd:
       - go build -ldflags='-s -w' -o ./bin/keymod ./cmd
+
+  install:systemd:
+    cmd:
+      - ln -sf $PWD/systemd/keymod.service /etc/systemd/system/keymod.service
+      - ln -sf $PWD/systemd/udev.rules /etc/udev/rules.d/99-input-hotplug-keymod.rules
+      - ln -sf $PWD/systemd/keymod-restart.service /etc/systemd/system/keymod-restart.service
+
+      - udevadm control --reload
+      - systemctl daemon-reload
+
+      - systemctl enable --now keymod.service

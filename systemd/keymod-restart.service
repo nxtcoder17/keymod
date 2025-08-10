@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart keymod when a new /dev/input device is added
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart keymod.service

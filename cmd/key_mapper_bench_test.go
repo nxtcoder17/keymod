@@ -10,14 +10,7 @@ import (
 
 func init() {
 	// Disable logging for benchmarks by writing to io.Discard
-	logger = fastlog.New(fastlog.Options{
-		Writer:        io.Discard,
-		ShowCaller:    false,
-		ShowDebugLogs: false,
-		ShowTimestamp: false,
-		EnableColors:  false,
-		Format:        fastlog.ConsoleFormat,
-	})
+	logger = fastlog.New(fastlog.WithWriter(io.Discard))
 }
 
 func BenchmarkKeyMapper_TapBehavior(b *testing.B) {
@@ -37,7 +30,7 @@ func BenchmarkKeyMapper_TapBehavior(b *testing.B) {
 			},
 		},
 	}
-	
+
 	kbd := &MyModKeyboard{
 		device:    mockDevice,
 		keyDownCh: make(chan *evdev.InputEvent, 1),
@@ -74,7 +67,7 @@ func BenchmarkKeyMapper_HoldBehavior(b *testing.B) {
 			},
 		},
 	}
-	
+
 	kbd := &MyModKeyboard{
 		device:    mockDevice,
 		keyDownCh: make(chan *evdev.InputEvent, 1),
@@ -113,7 +106,7 @@ func BenchmarkKeyMapper_PassthroughKeys(b *testing.B) {
 			},
 		},
 	}
-	
+
 	kbd := &MyModKeyboard{
 		device:    mockDevice,
 		keyDownCh: make(chan *evdev.InputEvent, 1),
@@ -157,7 +150,7 @@ func BenchmarkKeyMapper_ComplexSequence(b *testing.B) {
 			},
 		},
 	}
-	
+
 	kbd := &MyModKeyboard{
 		device:    mockDevice,
 		keyDownCh: make(chan *evdev.InputEvent, 1),
@@ -193,7 +186,7 @@ func BenchmarkKeyMapper_ComplexSequence(b *testing.B) {
 
 func BenchmarkParseKeyCode(b *testing.B) {
 	testKeys := []string{
-		"KEY_A", "A", "KEY_SPACE", "SPACE", 
+		"KEY_A", "A", "KEY_SPACE", "SPACE",
 		"KEY_LEFTCTRL", "LEFTCTRL", "KEY_ESC", "ESC",
 	}
 
@@ -267,3 +260,4 @@ func BenchmarkConfigLookup(b *testing.B) {
 		}
 	}
 }
+
