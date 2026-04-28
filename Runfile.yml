@@ -2,7 +2,13 @@ tasks:
   start:
     cmd:
       - go build -o ./bin/keymod ./cmd
-      - ./bin/keymod --debug
+      - ./bin/keymod --first
+
+  start:debug:
+    interactive: true
+    cmd:
+      - go build -o ./bin/keymod ./cmd
+      - sudo ./bin/keymod --first --debug  --config /home/nxtcoder17/.config/keymod/config.toml
 
   dev:
     watch:
@@ -12,3 +18,22 @@ tasks:
     cmd:
       - go build -o ./bin/keymod ./cmd
       - ./bin/keymod
+
+  build:
+    env:
+      CGO_ENABLED: 0
+    cmd:
+      - go build -ldflags='-s -w' -o ./bin/keymod ./cmd
+
+  install:systemd:
+    cmd:
+      - cp $PWD/systemd/keymod.service /etc/systemd/system/keymod.service
+      # - cp $PWD/systemd/udev.rules /etc/udev/rules.d/99-input-hotplug-keymod.rules
+      - cp $PWD/systemd/keymod-restart.service /etc/systemd/system/keymod-restart.service
+
+      # - udevadm control --reload
+      - systemctl daemon-reload
+
+      - systemctl stop keymod.service
+      - systemctl enable keymod.service
+      - systemctl start keymod.service

@@ -1,0 +1,10 @@
+[Unit]
+Description=Keymod - A keyboard remapping tool by nxtcoder17
+After=systemd-udev-settle.service
+
+[Service]
+ExecStart=sh -c '/home/nxtcoder17/workspace/nxtcoder17/keymod/bin/keymod --first --config /home/nxtcoder17/.config/keymod/config.toml'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
