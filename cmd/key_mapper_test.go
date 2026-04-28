@@ -1,25 +1,11 @@
 package main
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	evdev "github.com/holoplot/go-evdev"
-	"github.com/nxtcoder17/fastlog"
 )
-
-func init() {
-	// Initialize logger for tests
-	logger = fastlog.New(fastlog.Options{
-		Writer:        os.Stderr,
-		ShowCaller:    false,
-		ShowDebugLogs: false,
-		ShowTimestamp: false,
-		EnableColors:  false,
-		Format:        fastlog.ConsoleFormat,
-	})
-}
 
 func TestMyModKeyboard_TapBehavior(t *testing.T) {
 	tests := []struct {

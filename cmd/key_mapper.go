@@ -15,7 +15,6 @@ import (
 	"unicode"
 
 	evdev "github.com/holoplot/go-evdev"
-
 	"github.com/nxtcoder17/fastlog"
 )
 
@@ -24,6 +23,8 @@ const (
 	KeyDown int32 = 1
 	KeyHold int32 = 2
 )
+
+var logger fastlog.Logger
 
 func parseEventType(t int32) string {
 	switch t {
@@ -130,7 +131,7 @@ func extractDeviceNumber(s *evdev.InputDevice) int {
 	return n
 }
 
-func cloneDevice(devicePath string) (*evdev.InputDevice, error) {
+func cloneDevice(devicePath string, cfg *ParsedConfig) (*evdev.InputDevice, error) {
 	targetDev, err := evdev.Open(devicePath)
 	if err != nil {
 		fmt.Printf("failed to open target device for cloning: %s", err.Error())
@@ -138,7 +139,35 @@ func cloneDevice(devicePath string) (*evdev.InputDevice, error) {
 	}
 	defer targetDev.Close()
 
-	clonedDev, err := evdev.CloneDevice(fmt.Sprintf("CLONE - %s", must(targetDev.Name())), targetDev)
+	keyCodes := targetDev.CapableEvents(evdev.EV_KEY)
+	seenKeys := make(map[evdev.EvCode]bool, len(keyCodes)+len(cfg.ModMap)*3)
+	for _, code := range keyCodes {
+		seenKeys[code] = true
+	}
+
+	for _, mapping := range cfg.ModMap {
+		seenKeys[parseKeyCode(mapping.Key)] = true
+		seenKeys[parseKeyCode(mapping.Tap)] = true
+		seenKeys[parseKeyCode(mapping.Hold)] = true
+	}
+
+	keyCodes = keyCodes[:0]
+	for code := range seenKeys {
+		keyCodes = append(keyCodes, code)
+	}
+
+	clonedDev, err := evdev.CreateDevice(
+		fmt.Sprintf("keymod virtual keyboard - %s", must(targetDev.Name())),
+		evdev.InputID{
+			BusType: evdev.BUS_USB,
+			Vendor:  0xfeed,
+			Product: 0x0001,
+			Version: 1,
+		},
+		map[evdev.EvType][]evdev.EvCode{
+			evdev.EV_KEY: keyCodes,
+		},
+	)
 	if err != nil {
 		fmt.Printf("failed to clone device: %s", err.Error())
 		return nil, err
@@ -224,7 +253,6 @@ func (m *MyModKeyboard) ShutDown() error {
 
 func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 	if !strings.HasPrefix(event.CodeName(), "KEY_") {
-		kbd.dispatchKeyCodes(event)
 		return
 	}
 
@@ -270,7 +298,12 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 	logger.Info("listening on", "keyboard", must(keyboard.Name()))
 	defer logger.Info("STOPPED listening on", "keyboard", must(keyboard.Name()))
 
-	clone, err := cloneDevice(keyboard.Path())
+	c, err := LoadConfig(configFile)
+	if err != nil {
+		panic(err)
+	}
+
+	clone, err := cloneDevice(keyboard.Path(), c)
 	if err != nil {
 		logger.Error("failed to clone device", "err", err)
 		return err
@@ -283,11 +316,6 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 	}
 	defer keyboard.Ungrab()
 	eventsCh := make(chan *evdev.InputEvent, 1)
-
-	c, err := LoadConfig(configFile)
-	if err != nil {
-		panic(err)
-	}
 
 	mykb := &MyModKeyboard{
 		device:    &inputDeviceWrapper{clone},
@@ -323,8 +351,6 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 	return nil
 }
 
-var logger *fastlog.Logger
-
 var (
 	debug bool
 	first bool
@@ -349,7 +375,7 @@ func main() {
 		configFile = value
 	}
 
-	logger = fastlog.New(fastlog.ShowDebugLogs(debug), fastlog.WithoutCaller())
+	logger = fastlog.New().DebugMode(debug).Console()
 
 	logger.Info("CONFIG", "file", configFile)
 

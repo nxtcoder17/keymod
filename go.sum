@@ -2,5 +2,7 @@ github.com/holoplot/go-evdev v0.0.0-20240306072622-217e18f17db1 h1:92OsBIf5KB1Ta
 github.com/holoplot/go-evdev v0.0.0-20240306072622-217e18f17db1/go.mod h1:iHAf8OIncO2gcQ8XOjS7CMJ2aPbX2Bs0wl5pZyanEqk=
 github.com/nxtcoder17/fastlog v0.0.0-20250809192232-860e1962f4cd h1:2KJZ+QdhVOIb+GXqeTcpP7U3x5e8mrAvmfoYn90H+YY=
 github.com/nxtcoder17/fastlog v0.0.0-20250809192232-860e1962f4cd/go.mod h1:x6o+8WEHRGaWu9XEhSdTrjmDjKhVnKNXd/XZ56bNN/o=
+github.com/nxtcoder17/fastlog v0.0.0-20260417043916-b19467bc4e99 h1:g7OUjdVouLBI9jgKIJmB1lsIbl7PQ2q05rKetkEl33c=
+github.com/nxtcoder17/fastlog v0.0.0-20260417043916-b19467bc4e99/go.mod h1:x6o+8WEHRGaWu9XEhSdTrjmDjKhVnKNXd/XZ56bNN/o=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=

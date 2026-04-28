@@ -10,7 +10,7 @@ import (
 
 func init() {
 	// Disable logging for benchmarks by writing to io.Discard
-	logger = fastlog.New(fastlog.WithWriter(io.Discard))
+	logger = fastlog.New().Writer(io.Discard).Console()
 }
 
 func BenchmarkKeyMapper_TapBehavior(b *testing.B) {
@@ -260,4 +260,3 @@ func BenchmarkConfigLookup(b *testing.B) {
 		}
 	}
 }
-
