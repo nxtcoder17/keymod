@@ -312,6 +312,29 @@ func TestMyModKeyboard_ComplexSequences(t *testing.T) {
 			},
 			description: "Tap followed by hold should work correctly",
 		},
+		{
+			name: "check for double space",
+			config: &ParsedConfig{
+				ModMap: map[string]*TapAndHold{
+					"KEY_SPACE": {
+						Key:  "KEY_SPACE",
+						Tap:  "SPACE",
+						Hold: "LEFTSHIFT",
+					},
+				},
+			},
+			inputEvents: []*evdev.InputEvent{
+				// Down, Up and Up
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{
+				evdev.KEY_SPACE, // tap down
+				evdev.KEY_SPACE, // tap up
+			},
+			description: "1x Space for one Down+Up Pair, and a raw Up event",
+		},
 	}
 
 	for _, tt := range tests {
@@ -357,6 +380,122 @@ func TestMyModKeyboard_ComplexSequences(t *testing.T) {
 				if actualCodes[i] != expected {
 					t.Errorf("%s: key code %d mismatch\nexpected: %v\ngot: %v",
 						tt.description, i, expected, actualCodes[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMyModKeyboard_MacLikeRemaps(t *testing.T) {
+	macCfg := func() *ParsedConfig {
+		return &ParsedConfig{
+			ModMap: map[string]*TapAndHold{
+				"KEY_LEFTALT":  {Key: "KEY_LEFTALT", Tap: "KEY_LEFTCTRL", Hold: "KEY_LEFTCTRL"},
+				"KEY_LEFTMETA": {Key: "KEY_LEFTMETA", Tap: "KEY_LEFTALT", Hold: "KEY_LEFTALT"},
+			},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		inputEvents   []*evdev.InputEvent
+		expectedCodes []evdev.EvCode
+		description   string
+	}{
+		{
+			name: "lone_alt_tap_sends_ctrl_tap",
+			inputEvents: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{evdev.KEY_LEFTCTRL, evdev.KEY_LEFTCTRL},
+			description:   "Lone ALT press should emit a single CTRL tap",
+		},
+		{
+			name: "alt_t_combo_sends_ctrl_t",
+			inputEvents: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_T, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_T, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{evdev.KEY_LEFTCTRL, evdev.KEY_T, evdev.KEY_T, evdev.KEY_LEFTCTRL},
+			description:   "ALT+T should behave as CTRL+T (new tab)",
+		},
+		{
+			name: "super_t_combo_sends_alt_t",
+			inputEvents: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTMETA, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_T, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_T, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTMETA, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{evdev.KEY_LEFTALT, evdev.KEY_T, evdev.KEY_T, evdev.KEY_LEFTALT},
+			description:   "SUPER+T should behave as ALT+T",
+		},
+		{
+			name: "two_remapped_mods_plus_key",
+			inputEvents: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTMETA, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_T, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_T, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTMETA, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{
+				evdev.KEY_LEFTCTRL, evdev.KEY_LEFTALT,
+				evdev.KEY_T, evdev.KEY_T,
+				evdev.KEY_LEFTALT, evdev.KEY_LEFTCTRL,
+			},
+			description: "Two remapped modifiers held together must both apply",
+		},
+		{
+			name: "duplicate_up_ignored",
+			inputEvents: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{evdev.KEY_LEFTCTRL, evdev.KEY_LEFTCTRL},
+			description:   "Duplicate UP must not double-fire or panic",
+		},
+		{
+			name: "mapped_key_autorepeat_ignored",
+			inputEvents: []*evdev.InputEvent{
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyHold},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_LEFTALT, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{evdev.KEY_LEFTCTRL, evdev.KEY_LEFTCTRL},
+			description:   "Autorepeat of the modifier itself must not cause extras",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDevice := NewMockInputDevice("test-keyboard", "/dev/input/event0")
+			kbd := &MyModKeyboard{
+				device:    mockDevice,
+				keyDownCh: make(chan *evdev.InputEvent, 1),
+				cfg:       macCfg(),
+			}
+			for _, event := range tt.inputEvents {
+				kbd.onEvent(event)
+			}
+			time.Sleep(10 * time.Millisecond)
+			var actualCodes []evdev.EvCode
+			for _, event := range mockDevice.GetWrittenEvents() {
+				if event.Type == evdev.EV_KEY {
+					actualCodes = append(actualCodes, event.Code)
+				}
+			}
+			if len(actualCodes) != len(tt.expectedCodes) {
+				t.Fatalf("%s: expected %d key events, got %d (%v)", tt.description, len(tt.expectedCodes), len(actualCodes), actualCodes)
+			}
+			for i, expected := range tt.expectedCodes {
+				if actualCodes[i] != expected {
+					t.Errorf("%s: key code %d mismatch: expected %v got %v", tt.description, i, expected, actualCodes[i])
 				}
 			}
 		})

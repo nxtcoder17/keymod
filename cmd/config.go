@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	evdev "github.com/holoplot/go-evdev"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -18,6 +19,13 @@ type TapAndHold struct {
 
 type Config struct {
 	KeyMap []TapAndHold `json:"keymap"`
+}
+
+func normalizeKeyCode(s string) string {
+	if !strings.HasPrefix(s, "KEY_") {
+		return "KEY_" + s
+	}
+	return s
 }
 
 func LoadConfig(file string) (*ParsedConfig, error) {
@@ -38,10 +46,21 @@ func LoadConfig(file string) (*ParsedConfig, error) {
 	}
 
 	for _, th := range cfg.KeyMap {
-		if !strings.HasPrefix(th.Key, "KEY_") {
-			th.Key = "KEY_" + th.Key
+		th.Key = normalizeKeyCode(th.Key)
+		th.Tap = normalizeKeyCode(th.Tap)
+		th.Hold = normalizeKeyCode(th.Hold)
+
+		for _, code := range []string{th.Key, th.Tap, th.Hold} {
+			if _, ok := evdev.KEYFromString[code]; !ok {
+				return nil, fmt.Errorf("unknown key code %q in keymap entry %+v", code, th)
+			}
 		}
-		pc.ModMap[th.Key] = &th
+
+		// Copy per entry so each ModMap value owns its state; the
+		// handler must still never mutate these (it copies again per
+		// press into pendingPress).
+		entry := th
+		pc.ModMap[th.Key] = &entry
 	}
 
 	return pc, nil

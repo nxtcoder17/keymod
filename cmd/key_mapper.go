@@ -232,6 +232,11 @@ func (kdb *MyModKeyboard) dispatchRawKeyCodes(events ...*evdev.InputEvent) {
 	}
 }
 
+type pendingPress struct {
+	mapping  *TapAndHold
+	holdSent bool
+}
+
 type MyModKeyboard struct {
 	keyDownCh chan *evdev.InputEvent
 	cfg       *ParsedConfig
@@ -245,6 +250,25 @@ type MyModKeyboard struct {
 	counter       int
 	downCounter   int
 	prev          *TapAndHold
+
+	// Per-physical-key state. This is what makes combos (e.g. ALT+T)
+	// and multiple simultaneous remaps (Mac-like ALT->CTRL plus
+	// SUPER->ALT) work instead of the old single `prev` slot.
+	physicalDown map[evdev.EvCode]bool
+	pending      map[evdev.EvCode]*pendingPress
+	holdActive   map[evdev.EvCode]bool
+}
+
+func (kbd *MyModKeyboard) ensureState() {
+	if kbd.physicalDown == nil {
+		kbd.physicalDown = make(map[evdev.EvCode]bool)
+	}
+	if kbd.pending == nil {
+		kbd.pending = make(map[evdev.EvCode]*pendingPress)
+	}
+	if kbd.holdActive == nil {
+		kbd.holdActive = make(map[evdev.EvCode]bool)
+	}
 }
 
 func (m *MyModKeyboard) ShutDown() error {
@@ -256,35 +280,92 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 		return
 	}
 
+	kbd.ensureState()
+
 	kbd.counter += 1
 	if isKeyDown(event) {
 		kbd.downCounter += 1
 	}
 
-	logger := logger.With("event", eventToString(event), "kbd.prev", kbd.prev == nil, "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
+	logger := logger.With("event", eventToString(event), "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
 
-	if kbd.prev != nil && kbd.prev.pressedCounter+1 == kbd.downCounter && isKeyDown(event) {
-		logger.Info("dispatching [HOLD]", "keycode", evdev.KEYToString[parseKeyCode(kbd.prev.Hold)])
-		kbd.dispatchKeyCodes(eventKeyDown(parseKeyCode(kbd.prev.Hold)))
-		kbd.prev = nil
+	// Kernel autorepeat for a mapped key carries no new information:
+	// the key is already physically down. Swallow it so a held
+	// modifier doesn't re-promote or a tap doesn't double-fire.
+	// Repeat of a *chord* key (e.g. holding T in ALT+T) is a non-mapped
+	// key and still falls through to passthrough below, so key repeat
+	// keeps working where it should.
+	if _, ok := kbd.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY && event.Value == KeyHold {
+		return
+	}
+
+	// Any *other* key going down promotes all still-pending mapped keys
+	// to HOLD. This single rule is what makes combos work: ALT DOWN,
+	// T DOWN => CTRL DOWN, T DOWN. It also handles several pending
+	// remaps at once (ALT+SUPER+T).
+	if isKeyDown(event) {
+		for code, p := range kbd.pending {
+			if code == event.Code {
+				continue
+			}
+			if !p.holdSent {
+				logger.Info("dispatching [HOLD]", "keycode", evdev.KEYToString[parseKeyCode(p.mapping.Hold)])
+				kbd.dispatchKeyCodes(eventKeyDown(parseKeyCode(p.mapping.Hold)))
+				p.holdSent = true
+				kbd.holdActive[code] = true
+			}
+		}
+		// A pending entry that already sent HOLD is no longer pending.
+		for code, p := range kbd.pending {
+			if p.holdSent {
+				delete(kbd.pending, code)
+			}
+		}
 	}
 
 	if tapAndHold, ok := kbd.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY {
 		switch event.Value {
 		case KeyDown:
-			logger.Info("modkey [DOWN]")
-			tapAndHold.pressedCounter = kbd.downCounter
-			kbd.prev = tapAndHold
-		case KeyUp:
-			logger.Info("modkey [UP]", "kbd.downCounter", kbd.downCounter)
-			if tapAndHold.pressedCounter == kbd.downCounter {
-				// immediate release, no other keydown events in between, means => TAP behaviour
-				logger.Info("dispatching [TAP]", "keycode", evdev.KEYToString[parseKeyCode(kbd.prev.Tap)])
-				kbd.dispatchKeyCodes(eventKeyPress(parseKeyCode(tapAndHold.Tap))...)
-				kbd.prev = nil
+			// Bounce / duplicate DOWN while physically down: ignore.
+			// Previously this false-promoted to HOLD and later produced
+			// an extra TAP (double-space).
+			if kbd.physicalDown[event.Code] {
 				return
 			}
-			kbd.dispatchKeyCodes(eventKeyUp(parseKeyCode(tapAndHold.Hold)))
+			kbd.physicalDown[event.Code] = true
+			logger.Info("modkey [DOWN]")
+			// Copy the mapping: never mutate the shared ModMap entry,
+			// otherwise overlapping presses corrupt each other.
+			m := *tapAndHold
+			kbd.pending[event.Code] = &pendingPress{mapping: &m}
+			kbd.prev = tapAndHold
+			tapAndHold.pressedCounter = kbd.downCounter
+		case KeyUp:
+			// Duplicate / stale UP with no matching DOWN: ignore.
+			// This was the double-space panic path: the second UP
+			// re-entered TAP with kbd.prev == nil (key_mapper.go:282).
+			if !kbd.physicalDown[event.Code] {
+				return
+			}
+			kbd.physicalDown[event.Code] = false
+			logger.Info("modkey [UP]", "kbd.downCounter", kbd.downCounter)
+			if p, stillPending := kbd.pending[event.Code]; stillPending {
+				// No other key went down in between => TAP.
+				delete(kbd.pending, event.Code)
+				kbd.prev = nil
+				logger.Info("dispatching [TAP]", "keycode", evdev.KEYToString[parseKeyCode(p.mapping.Tap)])
+				kbd.dispatchKeyCodes(eventKeyPress(parseKeyCode(p.mapping.Tap))...)
+				return
+			}
+			if kbd.holdActive[event.Code] {
+				delete(kbd.holdActive, event.Code)
+				kbd.prev = nil
+				kbd.dispatchKeyCodes(eventKeyUp(parseKeyCode(tapAndHold.Hold)))
+				return
+			}
+			// UP with no pending TAP and no active HOLD (e.g. state was
+			// cleared by a previous release): nothing to emit.
+			kbd.prev = nil
 		}
 
 		return
@@ -295,8 +376,8 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 }
 
 func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
-	logger.Info("listening on", "keyboard", must(keyboard.Name()))
-	defer logger.Info("STOPPED listening on", "keyboard", must(keyboard.Name()))
+	logger.Info("[STARTED] listening on", "keyboard", must(keyboard.Name()))
+	defer logger.Info("[STOPPED] listening on", "keyboard", must(keyboard.Name()))
 
 	c, err := LoadConfig(configFile)
 	if err != nil {
@@ -315,6 +396,7 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 		return err
 	}
 	defer keyboard.Ungrab()
+
 	eventsCh := make(chan *evdev.InputEvent, 1)
 
 	mykb := &MyModKeyboard{
