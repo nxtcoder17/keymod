@@ -91,9 +91,8 @@ func TestMyModKeyboard_TapBehavior(t *testing.T) {
 
 			// Create keyboard handler
 			kbd := &MyModKeyboard{
-				device:    mockDevice,
-				keyDownCh: make(chan *evdev.InputEvent, 1),
-				cfg:       tt.config,
+				device: mockDevice,
+				cfg:    tt.config,
 			}
 
 			// Process input events
@@ -210,13 +209,15 @@ func TestMyModKeyboard_HoldBehavior(t *testing.T) {
 
 			// Create keyboard handler
 			kbd := &MyModKeyboard{
-				device:    mockDevice,
-				keyDownCh: make(chan *evdev.InputEvent, 1),
-				cfg:       tt.config,
+				device: mockDevice,
+				cfg:    tt.config,
 			}
 
-			// Process input events
-			for _, event := range tt.inputEvents {
+			// Process input events - HOLD needs mod held >=50ms
+			for i, event := range tt.inputEvents {
+				if i == 1 {
+					time.Sleep(60 * time.Millisecond)
+				}
 				kbd.onEvent(event)
 			}
 
@@ -335,6 +336,23 @@ func TestMyModKeyboard_ComplexSequences(t *testing.T) {
 			},
 			description: "1x Space for one Down+Up Pair, and a raw Up event",
 		},
+		{
+			name: "chatter_debounce",
+			config: &ParsedConfig{
+				ModMap: map[string]*TapAndHold{
+					"KEY_SPACE": {Key: "KEY_SPACE", Tap: "SPACE", Hold: "LEFTSHIFT"},
+				},
+			},
+			inputEvents: []*evdev.InputEvent{
+				// Keyboard chatter: 2 rapid DOWN,UP cycles = 1 TAP
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyUp},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyDown},
+				{Type: evdev.EV_KEY, Code: evdev.KEY_SPACE, Value: KeyUp},
+			},
+			expectedCodes: []evdev.EvCode{evdev.KEY_SPACE, evdev.KEY_SPACE},
+			description:   "Rapid chatter within 50ms should be 1 TAP",
+		},
 	}
 
 	for _, tt := range tests {
@@ -344,13 +362,18 @@ func TestMyModKeyboard_ComplexSequences(t *testing.T) {
 
 			// Create keyboard handler
 			kbd := &MyModKeyboard{
-				device:    mockDevice,
-				keyDownCh: make(chan *evdev.InputEvent, 1),
-				cfg:       tt.config,
+				device: mockDevice,
+				cfg:    tt.config,
 			}
 
-			// Process input events
-			for _, event := range tt.inputEvents {
+			// Process input events - simple 50ms DOWN->UP + 50ms debounce
+			for i, event := range tt.inputEvents {
+				if tt.name == "multiple_taps_in_sequence" && i == 2 {
+					time.Sleep(60 * time.Millisecond)
+				}
+				if tt.name == "tap_then_hold_sequence" && i == 3 {
+					time.Sleep(60 * time.Millisecond)
+				}
 				kbd.onEvent(event)
 			}
 
@@ -476,11 +499,16 @@ func TestMyModKeyboard_MacLikeRemaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockDevice := NewMockInputDevice("test-keyboard", "/dev/input/event0")
 			kbd := &MyModKeyboard{
-				device:    mockDevice,
-				keyDownCh: make(chan *evdev.InputEvent, 1),
-				cfg:       macCfg(),
+				device: mockDevice,
+				cfg:    macCfg(),
 			}
-			for _, event := range tt.inputEvents {
+			for i, event := range tt.inputEvents {
+				// HOLD needs mod held >=50ms
+				if (tt.name == "alt_t_combo_sends_ctrl_t" && i == 1) ||
+					(tt.name == "super_t_combo_sends_alt_t" && i == 1) ||
+					(tt.name == "two_remapped_mods_plus_key" && (i == 1 || i == 2)) {
+					time.Sleep(60 * time.Millisecond)
+				}
 				kbd.onEvent(event)
 			}
 			time.Sleep(10 * time.Millisecond)

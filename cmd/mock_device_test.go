@@ -103,4 +103,3 @@ func (m *MockInputDevice) WasClosed() bool {
 	defer m.mu.Unlock()
 	return m.closeCalled
 }
-

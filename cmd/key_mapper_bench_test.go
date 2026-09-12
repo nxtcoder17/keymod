@@ -32,9 +32,8 @@ func BenchmarkKeyMapper_TapBehavior(b *testing.B) {
 	}
 
 	kbd := &MyModKeyboard{
-		device:    mockDevice,
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       cfg,
+		device: mockDevice,
+		cfg:    cfg,
 	}
 
 	// Benchmark tap events
@@ -51,7 +50,6 @@ func BenchmarkKeyMapper_TapBehavior(b *testing.B) {
 		mockDevice.ClearWrittenEvents()
 		kbd.counter = 0
 		kbd.downCounter = 0
-		kbd.prev = nil
 	}
 }
 
@@ -69,9 +67,8 @@ func BenchmarkKeyMapper_HoldBehavior(b *testing.B) {
 	}
 
 	kbd := &MyModKeyboard{
-		device:    mockDevice,
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       cfg,
+		device: mockDevice,
+		cfg:    cfg,
 	}
 
 	// Benchmark hold events (CAPS+A)
@@ -90,7 +87,6 @@ func BenchmarkKeyMapper_HoldBehavior(b *testing.B) {
 		mockDevice.ClearWrittenEvents()
 		kbd.counter = 0
 		kbd.downCounter = 0
-		kbd.prev = nil
 	}
 }
 
@@ -108,9 +104,8 @@ func BenchmarkKeyMapper_PassthroughKeys(b *testing.B) {
 	}
 
 	kbd := &MyModKeyboard{
-		device:    mockDevice,
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       cfg,
+		device: mockDevice,
+		cfg:    cfg,
 	}
 
 	// Benchmark unmapped key passthrough
@@ -129,7 +124,6 @@ func BenchmarkKeyMapper_PassthroughKeys(b *testing.B) {
 		mockDevice.ClearWrittenEvents()
 		kbd.counter = 0
 		kbd.downCounter = 0
-		kbd.prev = nil
 	}
 }
 
@@ -152,9 +146,8 @@ func BenchmarkKeyMapper_ComplexSequence(b *testing.B) {
 	}
 
 	kbd := &MyModKeyboard{
-		device:    mockDevice,
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       cfg,
+		device: mockDevice,
+		cfg:    cfg,
 	}
 
 	// Complex sequence: tap CAPS, hold SPACE+A, tap CAPS
@@ -180,7 +173,6 @@ func BenchmarkKeyMapper_ComplexSequence(b *testing.B) {
 		mockDevice.ClearWrittenEvents()
 		kbd.counter = 0
 		kbd.downCounter = 0
-		kbd.prev = nil
 	}
 }
 
@@ -201,9 +193,8 @@ func BenchmarkParseKeyCode(b *testing.B) {
 func BenchmarkDispatchKeyCodes_Single(b *testing.B) {
 	mockDevice := NewMockInputDevice("test-keyboard", "/dev/input/event0")
 	kbd := &MyModKeyboard{
-		device:    mockDevice,
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       &ParsedConfig{ModMap: make(map[string]*TapAndHold)},
+		device: mockDevice,
+		cfg:    &ParsedConfig{ModMap: make(map[string]*TapAndHold)},
 	}
 
 	event := &evdev.InputEvent{Type: evdev.EV_KEY, Code: evdev.KEY_A, Value: KeyDown}
@@ -218,9 +209,8 @@ func BenchmarkDispatchKeyCodes_Single(b *testing.B) {
 func BenchmarkDispatchKeyCodes_Multiple(b *testing.B) {
 	mockDevice := NewMockInputDevice("test-keyboard", "/dev/input/event0")
 	kbd := &MyModKeyboard{
-		device:    mockDevice,
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       &ParsedConfig{ModMap: make(map[string]*TapAndHold)},
+		device: mockDevice,
+		cfg:    &ParsedConfig{ModMap: make(map[string]*TapAndHold)},
 	}
 
 	events := []*evdev.InputEvent{

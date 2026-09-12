@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode"
 
 	evdev "github.com/holoplot/go-evdev"
@@ -50,7 +51,7 @@ func parseKeyCode(s string) evdev.EvCode {
 }
 
 func eventToString(ev *evdev.InputEvent) string {
-	return fmt.Sprintf("[type] %-12s[key] %s", parseEventType(ev.Value), ev.CodeName())
+	return fmt.Sprintf("[type] %-12s[key] %s [value] %d", parseEventType(ev.Value), ev.CodeName(), ev.Value)
 }
 
 func findAllKeyboards() ([]*evdev.InputDevice, error) {
@@ -145,10 +146,10 @@ func cloneDevice(devicePath string, cfg *ParsedConfig) (*evdev.InputDevice, erro
 		seenKeys[code] = true
 	}
 
-	for _, mapping := range cfg.ModMap {
-		seenKeys[parseKeyCode(mapping.Key)] = true
-		seenKeys[parseKeyCode(mapping.Tap)] = true
-		seenKeys[parseKeyCode(mapping.Hold)] = true
+	for k, mapping := range cfg.ModMap {
+		seenKeys[k] = true
+		seenKeys[mapping.Tap] = true
+		seenKeys[mapping.Hold] = true
 	}
 
 	keyCodes = keyCodes[:0]
@@ -201,13 +202,6 @@ func eventKeyDown(key evdev.EvCode) *evdev.InputEvent {
 	}
 }
 
-func withModifierKey(modifier evdev.EvCode, events ...*evdev.InputEvent) []*evdev.InputEvent {
-	mods := make([]*evdev.InputEvent, 0, 2+len(events))
-	mods = append(mods, eventKeyDown(modifier))
-	mods = append(mods, events...)
-	return mods
-}
-
 func (kdb *MyModKeyboard) dispatchKeyCodes(events ...*evdev.InputEvent) {
 	if len(events) == 0 {
 		return
@@ -223,64 +217,32 @@ func (kdb *MyModKeyboard) dispatchKeyCodes(events ...*evdev.InputEvent) {
 	})
 }
 
-func (kdb *MyModKeyboard) dispatchRawKeyCodes(events ...*evdev.InputEvent) {
-	if len(events) == 0 {
-		return
-	}
-	for i := range events {
-		kdb.device.WriteOne(events[i])
-	}
-}
+const tapThreshold = 50 * time.Millisecond // DOWN->UP <50ms => TAP, else HOLD
 
-type pendingPress struct {
-	mapping  *TapAndHold
-	holdSent bool
+type action struct {
+	tap        evdev.EvCode
+	hold       evdev.EvCode
+	tapTimeout time.Duration
+	since      time.Time
 }
 
 type MyModKeyboard struct {
-	keyDownCh chan *evdev.InputEvent
-	cfg       *ParsedConfig
-
+	cfg    *ParsedConfig
 	device InputDevice
 
-	onModHold    func()
-	onModRelease func()
+	modifierKeys map[evdev.EvCode]struct{}
 
-	sendHoldEvent context.CancelFunc
-	counter       int
-	downCounter   int
-	prev          *TapAndHold
+	counter     int
+	downCounter int
 
-	// Per-physical-key state. This is what makes combos (e.g. ALT+T)
-	// and multiple simultaneous remaps (Mac-like ALT->CTRL plus
-	// SUPER->ALT) work instead of the old single `prev` slot.
-	physicalDown map[evdev.EvCode]bool
-	pending      map[evdev.EvCode]*pendingPress
-	holdActive   map[evdev.EvCode]bool
-}
-
-func (kbd *MyModKeyboard) ensureState() {
-	if kbd.physicalDown == nil {
-		kbd.physicalDown = make(map[evdev.EvCode]bool)
-	}
-	if kbd.pending == nil {
-		kbd.pending = make(map[evdev.EvCode]*pendingPress)
-	}
-	if kbd.holdActive == nil {
-		kbd.holdActive = make(map[evdev.EvCode]bool)
-	}
-}
-
-func (m *MyModKeyboard) ShutDown() error {
-	return m.device.Close()
+	downQ map[evdev.EvCode]action
+	upQ   map[evdev.EvCode]evdev.EvCode
 }
 
 func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 	if !strings.HasPrefix(event.CodeName(), "KEY_") {
 		return
 	}
-
-	kbd.ensureState()
 
 	kbd.counter += 1
 	if isKeyDown(event) {
@@ -289,89 +251,66 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 
 	logger := logger.With("event", eventToString(event), "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
 
-	// Kernel autorepeat for a mapped key carries no new information:
-	// the key is already physically down. Swallow it so a held
-	// modifier doesn't re-promote or a tap doesn't double-fire.
-	// Repeat of a *chord* key (e.g. holding T in ALT+T) is a non-mapped
-	// key and still falls through to passthrough below, so key repeat
-	// keeps working where it should.
-	if _, ok := kbd.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY && event.Value == KeyHold {
-		return
-	}
-
-	// Any *other* key going down promotes all still-pending mapped keys
-	// to HOLD. This single rule is what makes combos work: ALT DOWN,
-	// T DOWN => CTRL DOWN, T DOWN. It also handles several pending
-	// remaps at once (ALT+SUPER+T).
-	if isKeyDown(event) {
-		for code, p := range kbd.pending {
-			if code == event.Code {
-				continue
+	switch event.Value {
+	case KeyDown:
+		{
+			if kbd.downQ == nil {
+				kbd.downQ = make(map[evdev.EvCode]action)
 			}
-			if !p.holdSent {
-				logger.Info("dispatching [HOLD]", "keycode", evdev.KEYToString[parseKeyCode(p.mapping.Hold)])
-				kbd.dispatchKeyCodes(eventKeyDown(parseKeyCode(p.mapping.Hold)))
-				p.holdSent = true
-				kbd.holdActive[code] = true
+
+			if t, ok := kbd.cfg.ModMap[event.Code]; ok {
+				logger.Info("queing mapped key", "key", event.CodeName(), "tap", evdev.KEYNames[t.Tap], "hold", evdev.KEYNames[t.Hold])
+				kbd.downQ[event.Code] = action{tap: t.Tap, hold: t.Hold, since: time.Now(), tapTimeout: t.TapTimeout}
+				return
+			}
+
+			if _, ok := kbd.modifierKeys[event.Code]; ok {
+				logger.Info("queing original modifier", "key", event.CodeName())
+				kbd.downQ[event.Code] = action{hold: event.Code, since: time.Now()}
+				return
+			}
+
+			for k, v := range kbd.downQ {
+				logger.Info("[DISPATCHING:downQ]", "key", evdev.KEYNames[v.hold])
+				kbd.dispatchKeyCodes(eventKeyDown(v.hold))
+				delete(kbd.downQ, k)
+				if kbd.upQ == nil {
+					kbd.upQ = make(map[evdev.EvCode]evdev.EvCode, 1)
+				}
+				kbd.upQ[k] = v.hold
 			}
 		}
-		// A pending entry that already sent HOLD is no longer pending.
-		for code, p := range kbd.pending {
-			if p.holdSent {
-				delete(kbd.pending, code)
+	case KeyUp:
+		{
+			if _, ok := kbd.cfg.ModMap[event.Code]; ok {
+				if act, ok := kbd.downQ[event.Code]; ok {
+					delete(kbd.downQ, event.Code)
+
+					logger.Info("will  [DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
+					// kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
+					if time.Since(act.since) <= act.tapTimeout {
+						logger.Info("[DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
+						kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
+						return
+					}
+				}
+
+				if act, ok := kbd.upQ[event.Code]; ok {
+					delete(kbd.upQ, event.Code)
+					logger.Info("[DISPATCHING/upQ]: ", "key", evdev.KEYNames[act])
+					kbd.dispatchKeyCodes(eventKeyUp(act))
+				}
+
+				return
+			}
+
+			if _, ok := kbd.modifierKeys[event.Code]; ok {
+				delete(kbd.downQ, event.Code)
 			}
 		}
 	}
 
-	if tapAndHold, ok := kbd.cfg.ModMap[event.CodeName()]; ok && event.Type == evdev.EV_KEY {
-		switch event.Value {
-		case KeyDown:
-			// Bounce / duplicate DOWN while physically down: ignore.
-			// Previously this false-promoted to HOLD and later produced
-			// an extra TAP (double-space).
-			if kbd.physicalDown[event.Code] {
-				return
-			}
-			kbd.physicalDown[event.Code] = true
-			logger.Info("modkey [DOWN]")
-			// Copy the mapping: never mutate the shared ModMap entry,
-			// otherwise overlapping presses corrupt each other.
-			m := *tapAndHold
-			kbd.pending[event.Code] = &pendingPress{mapping: &m}
-			kbd.prev = tapAndHold
-			tapAndHold.pressedCounter = kbd.downCounter
-		case KeyUp:
-			// Duplicate / stale UP with no matching DOWN: ignore.
-			// This was the double-space panic path: the second UP
-			// re-entered TAP with kbd.prev == nil (key_mapper.go:282).
-			if !kbd.physicalDown[event.Code] {
-				return
-			}
-			kbd.physicalDown[event.Code] = false
-			logger.Info("modkey [UP]", "kbd.downCounter", kbd.downCounter)
-			if p, stillPending := kbd.pending[event.Code]; stillPending {
-				// No other key went down in between => TAP.
-				delete(kbd.pending, event.Code)
-				kbd.prev = nil
-				logger.Info("dispatching [TAP]", "keycode", evdev.KEYToString[parseKeyCode(p.mapping.Tap)])
-				kbd.dispatchKeyCodes(eventKeyPress(parseKeyCode(p.mapping.Tap))...)
-				return
-			}
-			if kbd.holdActive[event.Code] {
-				delete(kbd.holdActive, event.Code)
-				kbd.prev = nil
-				kbd.dispatchKeyCodes(eventKeyUp(parseKeyCode(tapAndHold.Hold)))
-				return
-			}
-			// UP with no pending TAP and no active HOLD (e.g. state was
-			// cleared by a previous release): nothing to emit.
-			kbd.prev = nil
-		}
-
-		return
-	}
-
-	logger.Info("non-modkey")
+	logger.Debug("[DISPATCHING]", "key", event.CodeName())
 	kbd.dispatchKeyCodes(event)
 }
 
@@ -400,9 +339,19 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 	eventsCh := make(chan *evdev.InputEvent, 1)
 
 	mykb := &MyModKeyboard{
-		device:    &inputDeviceWrapper{clone},
-		keyDownCh: make(chan *evdev.InputEvent, 1),
-		cfg:       c,
+		device: &inputDeviceWrapper{clone},
+		cfg:    c,
+		modifierKeys: map[evdev.EvCode]struct{}{
+			evdev.KEY_LEFTMETA:   struct{}{},
+			evdev.KEY_RIGHTMETA:  struct{}{},
+			evdev.KEY_LEFTALT:    struct{}{},
+			evdev.KEY_RIGHTALT:   struct{}{},
+			evdev.KEY_LEFTCTRL:   struct{}{},
+			evdev.KEY_RIGHTCTRL:  {},
+			evdev.KEY_LEFTSHIFT:  struct{}{},
+			evdev.KEY_RIGHTSHIFT: struct{}{},
+		},
+		downQ: make(map[evdev.EvCode]action),
 	}
 
 	go func() {
@@ -413,10 +362,6 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 				}
 			}
 		}
-	}()
-
-	go func() {
-		<-mykb.keyDownCh
 	}()
 
 	for ctx.Err() == nil {
@@ -457,7 +402,7 @@ func main() {
 		configFile = value
 	}
 
-	logger = fastlog.New().DebugMode(debug).Console()
+	logger = fastlog.New().DebugMode(debug).Timestamp(false).Colors(true).Console()
 
 	logger.Info("CONFIG", "file", configFile)
 
