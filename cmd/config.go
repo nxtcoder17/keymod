@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	evdev "github.com/holoplot/go-evdev"
 	"github.com/pelletier/go-toml/v2"
 )
 
 type TapAndHold struct {
-	Key  string `json:"key"`
-	Tap  string `json:"tap"`
-	Hold string `json:"hold"`
-
-	pressedCounter int
+	Key        string `json:"key" toml:"key"`
+	Tap        string `json:"tap" toml:"tap"`
+	Hold       string `json:"hold" toml:"hold"`
+	TapTimeout int    `json:"tap-timeout" toml:"tap-timeout"`
 }
 
 type Config struct {
@@ -42,7 +42,7 @@ func LoadConfig(file string) (*ParsedConfig, error) {
 	logger.Info("LOADED", "config", fmt.Sprintf("%+v\n", cfg))
 
 	pc := &ParsedConfig{
-		ModMap: make(map[string]*TapAndHold, len(cfg.KeyMap)),
+		ModMap: make(map[evdev.EvCode]*ParsedTapAndHold, len(cfg.KeyMap)),
 	}
 
 	for _, th := range cfg.KeyMap {
@@ -56,16 +56,22 @@ func LoadConfig(file string) (*ParsedConfig, error) {
 			}
 		}
 
-		// Copy per entry so each ModMap value owns its state; the
-		// handler must still never mutate these (it copies again per
-		// press into pendingPress).
-		entry := th
-		pc.ModMap[th.Key] = &entry
+		pc.ModMap[evdev.KEYFromString[th.Key]] = &ParsedTapAndHold{
+			Tap:        evdev.KEYFromString[th.Tap],
+			Hold:       evdev.KEYFromString[th.Hold],
+			TapTimeout: time.Duration(th.TapTimeout) * time.Millisecond,
+		}
 	}
 
 	return pc, nil
 }
 
+type ParsedTapAndHold struct {
+	Tap        evdev.EvCode
+	Hold       evdev.EvCode
+	TapTimeout time.Duration
+}
+
 type ParsedConfig struct {
-	ModMap map[string]*TapAndHold
+	ModMap map[evdev.EvCode]*ParsedTapAndHold
 }

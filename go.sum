@@ -2,6 +2,8 @@ github.com/holoplot/go-evdev v0.0.0-20240306072622-217e18f17db1 h1:92OsBIf5KB1Ta
 github.com/holoplot/go-evdev v0.0.0-20240306072622-217e18f17db1/go.mod h1:iHAf8OIncO2gcQ8XOjS7CMJ2aPbX2Bs0wl5pZyanEqk=
 github.com/nxtcoder17/fastlog v0.0.0-20260417043916-b19467bc4e99 h1:g7OUjdVouLBI9jgKIJmB1lsIbl7PQ2q05rKetkEl33c=
 github.com/nxtcoder17/fastlog v0.0.0-20260417043916-b19467bc4e99/go.mod h1:x6o+8WEHRGaWu9XEhSdTrjmDjKhVnKNXd/XZ56bNN/o=
+github.com/nxtcoder17/fastlog v0.0.0-20260627152536-8a7ba81411c1 h1:w6du+SGOWA/F1/t+8Q44RMgBcYdNvhgICbqV50ZDNOU=
+github.com/nxtcoder17/fastlog v0.0.0-20260627152536-8a7ba81411c1/go.mod h1:7c4hiLHr818voNoAD7+y/MbdFW8eqbhIzRh5C0qDXqc=
 github.com/nxtcoder17/go.errors v0.0.0-20251116060059-d31bd582d4c8 h1:C1vUEvYbbpofqK4xnbEU1htxZl66myq6ZJfHpcdA/GQ=
 github.com/nxtcoder17/go.errors v0.0.0-20251116060059-d31bd582d4c8/go.mod h1:9gp0I4JikKZGKflgPqqXCPZlIznVzlPWmnv+CWIrdxE=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
