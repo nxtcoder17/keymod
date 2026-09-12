@@ -237,6 +237,8 @@ type MyModKeyboard struct {
 
 	downQ map[evdev.EvCode]action
 	upQ   map[evdev.EvCode]evdev.EvCode
+
+	tapCache map[evdev.EvCode]time.Time
 }
 
 func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
@@ -256,6 +258,10 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 		{
 			if kbd.downQ == nil {
 				kbd.downQ = make(map[evdev.EvCode]action)
+			}
+
+			if _, ok := kbd.downQ[event.Code]; ok {
+				return
 			}
 
 			if t, ok := kbd.cfg.ModMap[event.Code]; ok {
@@ -289,8 +295,14 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 					logger.Info("will  [DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
 					// kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
 					if time.Since(act.since) <= act.tapTimeout {
+						if _, ok := kbd.tapCache[act.tap]; ok {
+							logger.Info("[DISPATCHING/tap/rate-limited]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
+							return
+						}
+
 						logger.Info("[DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
 						kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
+						kbd.tapCache[act.tap] = time.Now()
 						return
 					}
 				}
@@ -351,7 +363,8 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 			evdev.KEY_LEFTSHIFT:  struct{}{},
 			evdev.KEY_RIGHTSHIFT: struct{}{},
 		},
-		downQ: make(map[evdev.EvCode]action),
+		downQ:    make(map[evdev.EvCode]action),
+		tapCache: make(map[evdev.EvCode]time.Time),
 	}
 
 	go func() {
@@ -359,6 +372,18 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 			if strings.HasPrefix(ev.CodeName(), "KEY_") {
 				if debug {
 					logger.Debug("keyboard input", "event", eventToString(ev))
+				}
+			}
+		}
+	}()
+
+	go func() {
+		t := 200 * time.Millisecond
+		for {
+			<-time.After(t)
+			for k, v := range mykb.tapCache {
+				if time.Since(v) > t {
+					delete(mykb.tapCache, k)
 				}
 			}
 		}
@@ -402,7 +427,7 @@ func main() {
 		configFile = value
 	}
 
-	logger = fastlog.New().DebugMode(debug).Timestamp(false).Colors(true).Console()
+	logger = fastlog.New().DebugMode(debug).Timestamp(true).Colors(true).Console()
 
 	logger.Info("CONFIG", "file", configFile)
 
