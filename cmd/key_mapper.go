@@ -217,13 +217,11 @@ func (kdb *MyModKeyboard) dispatchKeyCodes(events ...*evdev.InputEvent) {
 	})
 }
 
-const tapThreshold = 50 * time.Millisecond // DOWN->UP <50ms => TAP, else HOLD
+const debounceWindow = 40 * time.Millisecond // per-key switch-bounce window
 
 type action struct {
-	tap        evdev.EvCode
-	hold       evdev.EvCode
-	tapTimeout time.Duration
-	since      time.Time
+	tap  evdev.EvCode
+	hold evdev.EvCode
 }
 
 type MyModKeyboard struct {
@@ -238,7 +236,8 @@ type MyModKeyboard struct {
 	downQ map[evdev.EvCode]action
 	upQ   map[evdev.EvCode]evdev.EvCode
 
-	tapCache map[evdev.EvCode]time.Time
+	pressed map[evdev.EvCode]struct{}  // accepted DOWN not yet released
+	lastUp  map[evdev.EvCode]time.Time // time of the last accepted UP
 }
 
 func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
@@ -246,12 +245,43 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 		return
 	}
 
+	logger := logger.With("event", eventToString(event), "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
+
+	// (1) Autorepeat (value == KeyHold) carries no new information. Swallow it,
+	// but ONLY for tap/hold keys and probes: normal keys must keep repeating.
+	if event.Value == KeyHold {
+		if _, ok := kbd.cfg.ModMap[event.Code]; ok {
+			return
+		}
+		if _, ok := kbd.modifierKeys[event.Code]; ok {
+			return
+		}
+	}
+
+	// (2) Input hygiene. A key can only be pressed again once it has been
+	// released for debounceWindow: that collapses a contact-bounce burst
+	// (down,up,down,up,...) into a single press, while leaving real repeats
+	// alone (a human cannot re-press the same key within the window).
+	if event.Value == KeyDown {
+		if _, down := kbd.pressed[event.Code]; down {
+			return // duplicate DOWN while still down
+		}
+		if t, ok := kbd.lastUp[event.Code]; ok && time.Since(t) < debounceWindow {
+			return // bounce: DOWN too soon after the last release
+		}
+		kbd.pressed[event.Code] = struct{}{}
+	} else if event.Value == KeyUp {
+		if _, ok := kbd.pressed[event.Code]; !ok {
+			return // stale/duplicate UP with no matching DOWN
+		}
+		delete(kbd.pressed, event.Code)
+		kbd.lastUp[event.Code] = time.Now()
+	}
+
 	kbd.counter += 1
 	if isKeyDown(event) {
 		kbd.downCounter += 1
 	}
-
-	logger := logger.With("event", eventToString(event), "kbd.counter", kbd.counter, "kbd.downCounter", kbd.downCounter)
 
 	switch event.Value {
 	case KeyDown:
@@ -260,22 +290,20 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 				kbd.downQ = make(map[evdev.EvCode]action)
 			}
 
-			if _, ok := kbd.downQ[event.Code]; ok {
-				return
-			}
-
 			if t, ok := kbd.cfg.ModMap[event.Code]; ok {
-				logger.Info("queing mapped key", "key", event.CodeName(), "tap", evdev.KEYNames[t.Tap], "hold", evdev.KEYNames[t.Hold])
-				kbd.downQ[event.Code] = action{tap: t.Tap, hold: t.Hold, since: time.Now(), tapTimeout: t.TapTimeout}
+				logger.Info("queuing mapped key", "key", event.CodeName(), "tap", evdev.KEYNames[t.Tap], "hold", evdev.KEYNames[t.Hold])
+				kbd.downQ[event.Code] = action{tap: t.Tap, hold: t.Hold}
 				return
 			}
 
+			// Plain modifiers go straight out. Emitting them immediately is what
+			// makes Shift+Shift / Ctrl+Shift / modifier-only chords work.
 			if _, ok := kbd.modifierKeys[event.Code]; ok {
-				logger.Info("queing original modifier", "key", event.CodeName())
-				kbd.downQ[event.Code] = action{hold: event.Code, since: time.Now()}
+				kbd.dispatchKeyCodes(eventKeyDown(event.Code))
 				return
 			}
 
+			// Any real key pressed while a mapped key is pending promotes it to HOLD.
 			for k, v := range kbd.downQ {
 				logger.Info("[DISPATCHING:downQ]", "key", evdev.KEYNames[v.hold])
 				kbd.dispatchKeyCodes(eventKeyDown(v.hold))
@@ -289,22 +317,13 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 	case KeyUp:
 		{
 			if _, ok := kbd.cfg.ModMap[event.Code]; ok {
+				// Still pending at release and never interrupted => TAP. No time
+				// gate: without a timer a lone press cannot become a HOLD.
 				if act, ok := kbd.downQ[event.Code]; ok {
 					delete(kbd.downQ, event.Code)
-
-					logger.Info("will  [DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
-					// kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
-					if time.Since(act.since) <= act.tapTimeout {
-						if _, ok := kbd.tapCache[act.tap]; ok {
-							logger.Info("[DISPATCHING/tap/rate-limited]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
-							return
-						}
-
-						logger.Info("[DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap], "time", time.Since(act.since), "threshold", act.tapTimeout)
-						kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
-						kbd.tapCache[act.tap] = time.Now()
-						return
-					}
+					logger.Info("[DISPATCHING/tap]: ", "key", evdev.KEYNames[act.tap])
+					kbd.dispatchKeyCodes(eventKeyDown(act.tap), eventKeyUp(act.tap))
+					return
 				}
 
 				if act, ok := kbd.upQ[event.Code]; ok {
@@ -317,7 +336,8 @@ func (kbd *MyModKeyboard) onEvent(event *evdev.InputEvent) {
 			}
 
 			if _, ok := kbd.modifierKeys[event.Code]; ok {
-				delete(kbd.downQ, event.Code)
+				kbd.dispatchKeyCodes(eventKeyUp(event.Code))
+				return
 			}
 		}
 	}
@@ -363,8 +383,9 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 			evdev.KEY_LEFTSHIFT:  struct{}{},
 			evdev.KEY_RIGHTSHIFT: struct{}{},
 		},
-		downQ:    make(map[evdev.EvCode]action),
-		tapCache: make(map[evdev.EvCode]time.Time),
+		downQ:   make(map[evdev.EvCode]action),
+		pressed: make(map[evdev.EvCode]struct{}),
+		lastUp:  make(map[evdev.EvCode]time.Time),
 	}
 
 	go func() {
@@ -372,18 +393,6 @@ func Start(ctx context.Context, keyboard *evdev.InputDevice) error {
 			if strings.HasPrefix(ev.CodeName(), "KEY_") {
 				if debug {
 					logger.Debug("keyboard input", "event", eventToString(ev))
-				}
-			}
-		}
-	}()
-
-	go func() {
-		t := 200 * time.Millisecond
-		for {
-			<-time.After(t)
-			for k, v := range mykb.tapCache {
-				if time.Since(v) > t {
-					delete(mykb.tapCache, k)
 				}
 			}
 		}
