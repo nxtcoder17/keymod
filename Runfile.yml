@@ -1,3 +1,7 @@
+env:
+  KEYMOD_CONFIG: 
+    sh: echo "$XDG_CONFIG_HOME/keymod/config.toml"
+
 tasks:
   start:
     cmd:
@@ -26,14 +30,16 @@ tasks:
       - go build -ldflags='-s -w' -o ./bin/keymod ./cmd
 
   install:systemd:
+    env:
+      KEYMOD_BIN:
+        sh: echo -n $PWD/bin/keymod
     cmd:
-      - cp $PWD/systemd/keymod.service /etc/systemd/system/keymod.service
+      - envsubst < $PWD/systemd/keymod.service > /etc/systemd/system/keymod.service
       # - cp $PWD/systemd/udev.rules /etc/udev/rules.d/99-input-hotplug-keymod.rules
       - cp $PWD/systemd/keymod-restart.service /etc/systemd/system/keymod-restart.service
 
       # - udevadm control --reload
       - systemctl daemon-reload
-
       - systemctl stop keymod.service
       - systemctl enable keymod.service
       - systemctl start keymod.service
